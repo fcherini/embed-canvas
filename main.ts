@@ -72,26 +72,22 @@ export default class CanvasNodeEmbedPlugin extends Plugin {
 
 	async nodesToMarkdown(nodes: CanvasNodeData[], canvasView: CanvasView) {
 		const basePath = canvasView.file.path.replace(".canvas", "");
-		const title = `# ${canvasView.file.name.replace(".canvas", "")}`;
 		const embedArray: string[] = [];
 
 		nodes.forEach((node) => {
 			embedArray.push(this.getNodeEmbedLink(node, canvasView.file.name));
 		});
 
-		let filePath = basePath + ".md";
+		let attemptPath = `${basePath}.md`;
 		let counter = 1;
 
-		while (await this.app.vault.getFileByPath(filePath)) {
-			filePath = `${basePath} (${counter}).md`;
+		while (this.app.vault.getFileByPath(attemptPath)) {
+			attemptPath = `${basePath} (${counter}).md`;
 			counter++;
 		}
 
-		// const filePath = canvasView.file.path.replace(".canvas", "");
-		// const checkFile = this.app.vault.getFileByPath(filePath + ".md");
-
 		const newFile = await this.app.vault.create(
-			filePath + ".md",
+			attemptPath,
 			embedArray.join("\b")
 		);
 		this.app.workspace.getLeaf(true).openFile(newFile);
@@ -157,7 +153,7 @@ export default class CanvasNodeEmbedPlugin extends Plugin {
 				(n: CanvasNodeData) => n.id === nodeId
 			);
 			if (!node) return;
-			console.log(file, node);
+
 			const linkIcon = await this.buildLinkIcon(node, file);
 			const container = await this.buildEmbedStructure(node);
 			embed.setAttribute("data-node-embed", "parsed");
@@ -272,7 +268,6 @@ export default class CanvasNodeEmbedPlugin extends Plugin {
 		`;
 
 		linkIcon.addEventListener("click", async (e) => {
-			console.log("clicked");
 			//TODO open link
 			this.app.workspace.getLeaf(true).openFile(canvasFile);
 		});
