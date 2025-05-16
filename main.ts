@@ -1,25 +1,25 @@
-import { MarkdownRenderer, Menu, Notice, Plugin, View } from "obsidian";
-import { CanvasNodeData, NodeEmbed, WorkspaceWithCanvas } from "types";
-
-interface MyPluginSettings {
-	mySetting: string;
-}
-
-function debounce(func: (...args: any[]) => void, delay: number) {
-	let timeoutId: number | undefined;
-	return (...args: any[]) => {
-		if (timeoutId !== undefined) {
-			clearTimeout(timeoutId);
-		}
-		timeoutId = window.setTimeout(() => {
-			func(...args);
-		}, delay);
-	};
-}
-// export const onNodeMenu = createEvent<{ menu: Menu; node: CanvasNode }>();
+import { MarkdownRenderer, Menu, Notice, Plugin, TFile } from "obsidian";
+import { Canvas, CanvasNodeData, CanvasView, WorkspaceWithCanvas } from "types";
 
 export default class CanvasNodeEmbedPlugin extends Plugin {
 	async onload() {
+		this.observeEmbeds();
+
+		this.addCommand({
+			id: "canvas-to-markdown",
+			name: "Canvas to markdown (retains canvas file)",
+			checkCallback: (checking: boolean) => {
+				const canvasView = this.app.workspace.getActiveFile();
+				if (canvasView?.extension === "canvas") {
+					if (!checking) {
+						new Notice("File created");
+						this.canvasToMarkdown();
+					}
+					return true;
+				}
+			},
+		});
+
 		const workspace = this.app.workspace as unknown as WorkspaceWithCanvas;
 		this.registerEvent(
 			workspace.on("canvas:node-menu", (menu: Menu, node: any) => {
@@ -32,88 +32,173 @@ export default class CanvasNodeEmbedPlugin extends Plugin {
 		);
 
 		this.registerEvent(
-			this.app.workspace.on("layout-change", async () => {
-				const activeView = this.getActiveView();
-				if (activeView) {
-					const embeds = this.getEmbeds(activeView);
-					const nodeEmbeds = await this.getEmbeddedNodes(embeds);
-					await this.replaceEmbeds(nodeEmbeds);
+			workspace.on(
+				"canvas:selection-menu",
+				(menu: Menu, canvas: Canvas) => {
+					menu.addItem((item) => {
+						item.setTitle(
+							"New markdown file from selection"
+						).onClick(() => this.selectionToMarkdown(canvas));
+					});
 				}
-			})
-		);
-	}
-
-	getActiveView() {
-		const activeLeaf = this.app.workspace.getMostRecentLeaf();
-		if (activeLeaf) {
-			return activeLeaf.view;
-		}
-		return null;
-	}
-
-	async replaceEmbeds(nodeEmbeds: NodeEmbed[]) {
-		for (const { embed, node } of nodeEmbeds) {
-			embed.empty();
-
-			const container = await this.buildEmbedStructure(node);
-
-			embed.appendChild(container);
-		}
-	}
-
-	getEmbeds(view: View): Element[] {
-		const embeds = Array.from(
-			view.containerEl.querySelectorAll(
-				".internal-embed:not(.canvas-nodecard-embed)"
 			)
 		);
-		return embeds;
 	}
 
-	private activeEmbeds = new Set<string>();
+	getNodeEmbedLink(node: CanvasNodeData, fileName: string) {
+		switch (node.type) {
+			case "file":
+				return `![[${node.file}]]`;
+			case "text":
+				return `![[${fileName}#${node.id}]]`;
+			default:
+				return "";
+		}
+	}
 
-	async getEmbeddedNodes(embeds: Element[]): Promise<NodeEmbed[]> {
-		const results: NodeEmbed[] = [];
+	//TODO new file (choose file or create new)
+	//TODO update existing file
+	//TODO link and zoom to node
 
-		for (const embed of embeds) {
-			const src = embed.getAttribute("src");
-			const match = src?.match(/^([\w\s\-\/.]+\.canvas)#([a-f0-9]+)$/);
-			if (!match) continue;
+	updateCanvasToMarkdown() {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) return;
+		this.app.fileManager.processFrontMatter(file, () => {});
+	}
 
-			const [_, canvasPath, nodeId] = match;
-			const currentFilePath =
-				this.app.workspace.getActiveFile()?.path || "";
-			const file = this.app.metadataCache.getFirstLinkpathDest(
-				canvasPath,
-				currentFilePath
-			);
-			if (!file) continue;
+	selectionToMarkdown(canvas: Canvas) {
+		this.nodesToMarkdown(canvas.getSelectionData().nodes, canvas.view);
+	}
 
-			try {
-				const content = await this.app.vault.read(file);
-				const json = JSON.parse(content);
-				const node = json.nodes?.find(
-					(n: CanvasNodeData) => n.id === nodeId
-				);
-				if (node) {
-					results.push({ embed, node });
-				}
-			} catch (err) {
-				console.error("Failed to read or parse canvas file:", err);
-			}
+	async nodesToMarkdown(nodes: CanvasNodeData[], canvasView: CanvasView) {
+		const basePath = canvasView.file.path.replace(".canvas", "");
+		const title = `# ${canvasView.file.name.replace(".canvas", "")}`;
+		const embedArray: string[] = [];
+
+		nodes.forEach((node) => {
+			embedArray.push(this.getNodeEmbedLink(node, canvasView.file.name));
+		});
+
+		let filePath = basePath + ".md";
+		let counter = 1;
+
+		while (await this.app.vault.getFileByPath(filePath)) {
+			filePath = `${basePath} (${counter}).md`;
+			counter++;
 		}
 
-		return results;
+		// const filePath = canvasView.file.path.replace(".canvas", "");
+		// const checkFile = this.app.vault.getFileByPath(filePath + ".md");
+
+		const newFile = await this.app.vault.create(
+			filePath + ".md",
+			embedArray.join("\b")
+		);
+		this.app.workspace.getLeaf(true).openFile(newFile);
 	}
 
-	async getClipboardEmbedLink(node: any) {
+	canvasToMarkdown() {
+		const canvasView = this.app.workspace.getMostRecentLeaf()
+			?.view as CanvasView;
+		const nodes = canvasView.canvas.getData().nodes;
+		this.nodesToMarkdown(nodes, canvasView);
+	}
+
+	observeEmbeds() {
+		const observer = new MutationObserver((mutations) => {
+			for (const mutation of mutations) {
+				for (const node of Array.from(mutation.addedNodes)) {
+					if (!(node instanceof HTMLElement)) continue;
+
+					if (
+						node.matches(
+							'.internal-embed:not([data-node-embed="parsed"])'
+						)
+					) {
+						this.tryReplaceEmbed(node);
+					} else {
+						const embeds = node.querySelectorAll?.(
+							'.internal-embed:not([data-node-embed="parsed"])'
+						);
+						embeds?.forEach((embed) => this.tryReplaceEmbed(embed));
+					}
+				}
+			}
+		});
+
+		observer.observe(document.body, {
+			childList: true,
+			subtree: true,
+		});
+	}
+
+	async tryReplaceEmbed(embed: Element) {
+		if (!(embed instanceof HTMLElement)) return;
+		if (embed.getAttribute("data-node-embed") === "parsed") return;
+
+		const src = embed.getAttribute("src");
+		const match = src?.match(/^([\w\s\-\/.]+\.canvas)#([a-f0-9]+)$/);
+		if (!match) return;
+
+		const [_, canvasPath, nodeId] = match;
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) return;
+
+		const file = this.app.metadataCache.getFirstLinkpathDest(
+			canvasPath,
+			activeFile.path
+		);
+		if (!file) return;
+
+		try {
+			const content = await this.app.vault.read(file);
+			const json = JSON.parse(content);
+			const node = json.nodes?.find(
+				(n: CanvasNodeData) => n.id === nodeId
+			);
+			if (!node) return;
+			console.log(file, node);
+			const linkIcon = await this.buildLinkIcon(node, file);
+			const container = await this.buildEmbedStructure(node);
+			embed.setAttribute("data-node-embed", "parsed");
+
+			embed.empty();
+			embed.appendChild(container);
+			embed.appendChild(linkIcon);
+			embed.classList.add("markdown-embed");
+			embed.setAttribute("data-type", "block");
+			embed.style.position = "relative";
+			embed.addEventListener(
+				"click",
+				(e) => {
+					e.stopImmediatePropagation();
+					e.preventDefault();
+				},
+				true
+			);
+		} catch (err) {
+			console.error("Failed to render canvas embed:", err);
+		}
+	}
+
+	getEmbedLink(fileName: string, nodeId: string) {
+		const link = `![[${fileName}#${nodeId}]]`;
+		return link;
+	}
+
+	async getClipboardEmbedLink(node: CanvasNodeData) {
 		const activeFile = this.app.workspace.getActiveFile();
 		if (!activeFile) {
 			new Notice("No active file found.");
 			return;
 		}
 
-		const link = `![[${activeFile.name}#${node.id}]]`;
+		let link = "";
+		if (node.file) {
+			link = `![[${node.file}]]`;
+		} else {
+			link = `![[${activeFile.name}#${node.id}]]`;
+		}
 
 		try {
 			await navigator.clipboard.writeText(link);
@@ -124,20 +209,7 @@ export default class CanvasNodeEmbedPlugin extends Plugin {
 		}
 	}
 
-	async buildEmbedStructure(node: CanvasNodeData) {
-		// Create the top-level container with appropriate classes
-		const container = document.createElement("div");
-		container.classList.add(
-			"internal-embed",
-			"markdown-embed",
-			"inline-embed",
-			"is-loaded",
-			"canvas-nodecard-embed" // Custom class to identify canvas node embeds
-		);
-		container.setAttribute("tabindex", "-1");
-		container.setAttribute("contenteditable", "false");
-		container.setAttribute("data-type", "block");
-
+	async buildEmbedStructure(node: any) {
 		// Create the content container
 		const contentEl = document.createElement("div");
 		contentEl.classList.add("markdown-embed-content", "node-insert-event");
@@ -152,6 +224,9 @@ export default class CanvasNodeEmbedPlugin extends Plugin {
 			"allow-fold-headings",
 			"allow-fold-lists"
 		);
+
+		const paragraphEl = document.createElement("div");
+		paragraphEl.classList.add("el-p");
 
 		// Create the sizer container
 		const sizerEl = document.createElement("div");
@@ -169,75 +244,55 @@ export default class CanvasNodeEmbedPlugin extends Plugin {
 		await MarkdownRenderer.render(
 			this.app,
 			node.text || "",
-			sizerEl,
+			paragraphEl,
 			this.app.workspace.getActiveFile()?.path || "",
 			this
 		);
-
-		// Assemble the elements
+		sizerEl.appendChild(paragraphEl);
 		previewEl.appendChild(sizerEl);
 		contentEl.appendChild(previewEl);
-		container.appendChild(contentEl);
 
-		return container;
+		return contentEl;
 	}
-}
 
-export class CanvasEmbed extends Plugin {
-	settings: MyPluginSettings;
+	buildLinkIcon(node: any, canvasFile: TFile) {
+		// Create link
+		const linkIcon = document.createElement("div");
+		linkIcon.classList.add("markdown-embed-link");
+		const src = `${canvasFile.path}#${node.id}`;
+		linkIcon.setAttribute("aria-label", "Open in canvas");
+		linkIcon.setAttribute("src", src);
+		linkIcon.innerHTML = `
+				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+						fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+						stroke-linejoin="round" class="svg-icon lucide-link">
+						<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+						<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+				</svg>
+		`;
 
-	onload() {
-		this.registerEvent(
-			this.app.workspace.on("layout-change", () => {
-				console.log("!!!!!!!! layout changed !!!!!!!!!!");
-				const canvasView = this.getActiveCanvasView();
-				if (canvasView) {
-					this.observeCanvasChanges(canvasView);
-				}
-			})
+		linkIcon.addEventListener("click", async (e) => {
+			console.log("clicked");
+			//TODO open link
+			this.app.workspace.getLeaf(true).openFile(canvasFile);
+		});
+		// Assemble the elements
+		linkIcon.style.position = "absolute";
+		linkIcon.style.top = "8px";
+		linkIcon.style.right = "8px";
+		linkIcon.style.cursor = "pointer";
+		linkIcon.style.opacity = "0.6";
+		linkIcon.style.transition = "opacity 0.2s ease-in-out";
+
+		linkIcon.addEventListener(
+			"mouseenter",
+			() => (linkIcon.style.opacity = "1")
 		);
-	}
+		linkIcon.addEventListener(
+			"mouseleave",
+			() => (linkIcon.style.opacity = "0.6")
+		);
 
-	getActiveCanvasView() {
-		const activeLeaf = this.app.workspace.getMostRecentLeaf();
-		if (
-			activeLeaf &&
-			activeLeaf.view &&
-			activeLeaf.view.containerEl.querySelector(".canvas-wrapper")
-		) {
-			return activeLeaf.view;
-		}
-		return null;
-	}
-
-	observeCanvasChanges(canvasView: View) {
-		const checkAndObserve = () => {
-			const target =
-				canvasView.containerEl.querySelector(".canvas-wrapper");
-			if (target) {
-				const view = canvasView as any;
-				const debouncedReplace = debounce(() => {
-					console.log("!!!! mutation triggered !!!!!");
-					console.log(view.canvas.data.nodes);
-					// this.replaceMinimapWithIcon();
-				}, 300); // Adjust the delay as needed
-
-				const observer = new MutationObserver(() => {
-					debouncedReplace();
-				});
-
-				observer.observe(target, {
-					childList: true,
-					subtree: true,
-				});
-
-				this.register(() => observer.disconnect());
-			} else {
-				// Retry after a short delay
-				setTimeout(checkAndObserve, 100);
-			}
-		};
-
-		checkAndObserve();
+		return linkIcon;
 	}
 }
