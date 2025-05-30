@@ -1,19 +1,140 @@
-import { MarkdownRenderer, Menu, Notice, Plugin, TFile } from "obsidian";
-import { Canvas, CanvasNodeData, CanvasView, WorkspaceWithCanvas } from "types";
+import { FileModal } from "components";
+import { createNewFile, nodesToMarkdown } from "utils";
+import { Menu, Notice, Plugin, TFile } from "obsidian";
+import {
+	Canvas,
+	CanvasData,
+	CanvasNodeData,
+	CanvasView,
+	WorkspaceWithCanvas,
+} from "types";
+import { buildEmbedStructure, buildLinkIcon } from "embedBuilder";
 
 export default class CanvasNodeEmbedPlugin extends Plugin {
 	async onload() {
 		this.observeEmbeds();
+		// 	id: "canvas-to-new-markdown",
+		// 	name: "Canvas to new markdown file (retains canvas file)",
+		// 	checkCallback: (checking: boolean) => {
+		// 		const file = this.app.workspace.getActiveFile();
+
+		// 		if (file?.extension === "canvas") {
+		// 			if (!checking) {
+		// 				const canvasView =
+		// 					this.app.workspace.getMostRecentLeaf()
+		// 						?.view as CanvasView;
+		// 				this.onCanvasToNewMarkdown(
+		// 					canvasView.canvas.getData().nodes,
+		// 					canvasView.file
+		// 				);
+		// 			}
+		// 			return true;
+		// 		}
+		// 		if (file?.extension === "markdown") {
+		// 			if (!checking) {
+		// 				new FileModal(this.app, async (chosenFile, evt) => {
+		// 					const canvasFile = await this.app.vault.read(
+		// 						chosenFile
+		// 					);
+		// 					const nodes = JSON.parse(canvasFile) as CanvasData;
+		// 					this.onCanvasToNewMarkdown(nodes.nodes, chosenFile);
+		// 				}).open();
+		// 			}
+		// 			return true;
+		// 		}
+		// 	},
+		// });
 
 		this.addCommand({
-			id: "canvas-to-markdown",
-			name: "Canvas to markdown (retains canvas file)",
+			id: "canvas-to-new-markdown",
+			name: "Canvas to new markdown file (retains canvas file)",
 			checkCallback: (checking: boolean) => {
-				const canvasView = this.app.workspace.getActiveFile();
-				if (canvasView?.extension === "canvas") {
+				const file = this.app.workspace.getActiveFile();
+
+				if (file?.extension === "canvas") {
+					const view = this.app.workspace.getMostRecentLeaf()
+						?.view as CanvasView;
+
 					if (!checking) {
-						new Notice("File created");
-						this.canvasToMarkdown();
+						this.onCanvasToNewMarkdown(
+							view.canvas.getData().nodes,
+							view.file
+						);
+					}
+					return true;
+				}
+
+				if (file?.extension === "md") {
+					if (!checking) {
+						new FileModal(this.app, async (chosenFile, evt) => {
+							try {
+								const canvasFile = await this.app.vault.read(
+									chosenFile
+								);
+								const nodes = JSON.parse(
+									canvasFile
+								) as CanvasData;
+								this.onCanvasToNewMarkdown(
+									nodes.nodes,
+									chosenFile
+								);
+							} catch (err) {
+								new Notice("Failed to read canvas file");
+								console.error(err);
+							}
+						}).open();
+					}
+					return true;
+				}
+
+				return false;
+			},
+		});
+
+		this.addCommand({
+			id: "append-canvas-to-file",
+			name: "Append canvas to this file",
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getActiveFile();
+				if (view?.extension === "markdown") {
+					if (!checking) {
+						new Notice("Canvas appended to file");
+						// this.onCanvasToNewMarkdown();
+					}
+					return true;
+				}
+			},
+		});
+
+		// this.addCommand({
+		// 	id: "canvas-to-new-markdown",
+		// 	name: "Canvas to new markdown file (retains canvas file)",
+		// 	checkCallback: (checking: boolean) => {
+		// 		const canvasView = this.app.workspace.getActiveFile();
+		// 		if (canvasView?.extension !== "canvas") {
+		// 			if (!checking) {
+		// 				new Notice("File created");
+		// 				this.onCanvasToNewMarkdown();
+		// 			}
+		// 			return true;
+		// 		}
+		// 	},
+		// });
+
+		this.addCommand({
+			id: "append-canvas-to-markdown",
+			name: "Append canvas content to markdown file (retains canvas file)",
+			checkCallback: (checking: boolean) => {
+				const canvasView = this.app.workspace.getMostRecentLeaf()
+					?.view as CanvasView;
+				if (canvasView.file.extension === "canvas") {
+					if (!checking) {
+						new FileModal(this.app, (file, evt) => {
+							this.onAppendCanvasToMarkdown(
+								canvasView.canvas,
+								file
+							);
+						}).open();
 					}
 					return true;
 				}
@@ -25,7 +146,7 @@ export default class CanvasNodeEmbedPlugin extends Plugin {
 			workspace.on("canvas:node-menu", (menu: Menu, node: any) => {
 				menu.addItem((item) => {
 					item.setTitle("Copy card embed link").onClick(() =>
-						this.getClipboardEmbedLink(node)
+						this.onCopyCardEmbed(node)
 					);
 				});
 			})
@@ -36,69 +157,36 @@ export default class CanvasNodeEmbedPlugin extends Plugin {
 				"canvas:selection-menu",
 				(menu: Menu, canvas: Canvas) => {
 					menu.addItem((item) => {
-						item.setTitle(
-							"New markdown file from selection"
-						).onClick(() => this.selectionToMarkdown(canvas));
+						item.setTitle("New .md file from selection").onClick(
+							() => this.onSelectionToMarkdown(canvas)
+						);
+					});
+				}
+			)
+		);
+
+		this.registerEvent(
+			workspace.on(
+				"canvas:selection-menu",
+				(menu: Menu, canvas: Canvas) => {
+					menu.addItem((item) => {
+						item.setTitle("Append selection to .md file").onClick(
+							() => {
+								new FileModal(this.app, (file, evt) => {
+									this.onAppendSelectionToFile(canvas, file);
+								}).open();
+							}
+						);
 					});
 				}
 			)
 		);
 	}
-
-	getNodeEmbedLink(node: CanvasNodeData, fileName: string) {
-		switch (node.type) {
-			case "file":
-				return `![[${node.file}]]`;
-			case "text":
-				return `![[${fileName}#${node.id}]]`;
-			default:
-				return "";
-		}
-	}
-
-	//TODO new file (choose file or create new)
+	//TODO markdown commands: append canvas to this file, replace this file with canvas content
+	//TODO check for file type on FileModal
 	//TODO update existing file
 	//TODO link and zoom to node
-
-	updateCanvasToMarkdown() {
-		const file = this.app.workspace.getActiveFile();
-		if (!file) return;
-		this.app.fileManager.processFrontMatter(file, () => {});
-	}
-
-	selectionToMarkdown(canvas: Canvas) {
-		this.nodesToMarkdown(canvas.getSelectionData().nodes, canvas.view);
-	}
-
-	async nodesToMarkdown(nodes: CanvasNodeData[], canvasView: CanvasView) {
-		const basePath = canvasView.file.path.replace(".canvas", "");
-		const embedArray: string[] = [];
-
-		nodes.forEach((node) => {
-			embedArray.push(this.getNodeEmbedLink(node, canvasView.file.name));
-		});
-
-		let attemptPath = `${basePath}.md`;
-		let counter = 1;
-
-		while (this.app.vault.getFileByPath(attemptPath)) {
-			attemptPath = `${basePath} (${counter}).md`;
-			counter++;
-		}
-
-		const newFile = await this.app.vault.create(
-			attemptPath,
-			embedArray.join("\b")
-		);
-		this.app.workspace.getLeaf(true).openFile(newFile);
-	}
-
-	canvasToMarkdown() {
-		const canvasView = this.app.workspace.getMostRecentLeaf()
-			?.view as CanvasView;
-		const nodes = canvasView.canvas.getData().nodes;
-		this.nodesToMarkdown(nodes, canvasView);
-	}
+	//TODO line break on appending
 
 	observeEmbeds() {
 		const observer = new MutationObserver((mutations) => {
@@ -128,12 +216,60 @@ export default class CanvasNodeEmbedPlugin extends Plugin {
 		});
 	}
 
+	async onAppendSelectionToFile(canvas: Canvas, file: TFile) {
+		const data = nodesToMarkdown(
+			canvas.getSelectionData().nodes,
+			canvas.view.file
+		);
+		await this.app.vault.append(file, data);
+		new Notice(`Selection appended to ${file.name}`);
+		this.app.workspace.getLeaf(true).openFile(file);
+	}
+
+	async onSelectionToMarkdown(canvas: Canvas) {
+		const file = canvas.view.file;
+		const data = nodesToMarkdown(canvas.getSelectionData().nodes, file);
+		await createNewFile(data, file.path.replace(".canvas", ""), this.app);
+	}
+
+	async onAppendCanvasToMarkdown(canvas: Canvas, mdFile: TFile) {
+		const data = nodesToMarkdown(canvas.getData().nodes, canvas.view.file);
+		await this.app.vault.append(mdFile, data);
+		new Notice(`Selection appended to ${mdFile.name}`);
+		this.app.workspace.getLeaf(true).openFile(mdFile);
+	}
+
+	async onCanvasToNewMarkdown(nodes: CanvasNodeData[], file: TFile) {
+		const data = nodesToMarkdown(nodes, file);
+		await createNewFile(data, file.path.replace(".canvas", ""), this.app);
+	}
+
+	async onCopyCardEmbed(node: CanvasNodeData) {
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) return;
+
+		let link = "";
+		if (node.file) {
+			link = `![[${node.file}]]`;
+		} else {
+			link = `![[${activeFile.name}#${node.id}]]`;
+		}
+
+		try {
+			await navigator.clipboard.writeText(link);
+			new Notice("Node link copied to clipboard!");
+		} catch (err) {
+			console.error("Failed to copy to clipboard:", err);
+			new Notice("Failed to copy node link to clipboard.");
+		}
+	}
+
 	async tryReplaceEmbed(embed: Element) {
 		if (!(embed instanceof HTMLElement)) return;
 		if (embed.getAttribute("data-node-embed") === "parsed") return;
 
 		const src = embed.getAttribute("src");
-		const match = src?.match(/^([\w\s\-\/.]+\.canvas)#([a-f0-9]+)$/);
+		const match = src?.match(/^([\w\s\-/.]+\.canvas)#([a-f0-9]+)$/);
 		if (!match) return;
 
 		const [_, canvasPath, nodeId] = match;
@@ -154,8 +290,8 @@ export default class CanvasNodeEmbedPlugin extends Plugin {
 			);
 			if (!node) return;
 
-			const linkIcon = await this.buildLinkIcon(node, file);
-			const container = await this.buildEmbedStructure(node);
+			const linkIcon = await buildLinkIcon(node, file, this.app);
+			const container = await buildEmbedStructure(node, this.app);
 			embed.setAttribute("data-node-embed", "parsed");
 
 			embed.empty();
@@ -175,119 +311,5 @@ export default class CanvasNodeEmbedPlugin extends Plugin {
 		} catch (err) {
 			console.error("Failed to render canvas embed:", err);
 		}
-	}
-
-	getEmbedLink(fileName: string, nodeId: string) {
-		const link = `![[${fileName}#${nodeId}]]`;
-		return link;
-	}
-
-	async getClipboardEmbedLink(node: CanvasNodeData) {
-		const activeFile = this.app.workspace.getActiveFile();
-		if (!activeFile) {
-			new Notice("No active file found.");
-			return;
-		}
-
-		let link = "";
-		if (node.file) {
-			link = `![[${node.file}]]`;
-		} else {
-			link = `![[${activeFile.name}#${node.id}]]`;
-		}
-
-		try {
-			await navigator.clipboard.writeText(link);
-			new Notice("Node link copied to clipboard!");
-		} catch (err) {
-			console.error("Failed to copy to clipboard:", err);
-			new Notice("Failed to copy node link to clipboard.");
-		}
-	}
-
-	async buildEmbedStructure(node: any) {
-		// Create the content container
-		const contentEl = document.createElement("div");
-		contentEl.classList.add("markdown-embed-content", "node-insert-event");
-
-		// Create the markdown preview container
-		const previewEl = document.createElement("div");
-		previewEl.classList.add(
-			"markdown-preview-view",
-			"markdown-rendered",
-			"node-insert-event",
-			"show-indentation-guide",
-			"allow-fold-headings",
-			"allow-fold-lists"
-		);
-
-		const paragraphEl = document.createElement("div");
-		paragraphEl.classList.add("el-p");
-
-		// Create the sizer container
-		const sizerEl = document.createElement("div");
-		sizerEl.classList.add(
-			"markdown-preview-sizer",
-			"markdown-preview-section"
-		);
-
-		// Create the pusher element
-		const pusherEl = document.createElement("div");
-		pusherEl.classList.add("markdown-preview-pusher");
-		sizerEl.appendChild(pusherEl);
-
-		// Render the markdown content into the sizer
-		await MarkdownRenderer.render(
-			this.app,
-			node.text || "",
-			paragraphEl,
-			this.app.workspace.getActiveFile()?.path || "",
-			this
-		);
-		sizerEl.appendChild(paragraphEl);
-		previewEl.appendChild(sizerEl);
-		contentEl.appendChild(previewEl);
-
-		return contentEl;
-	}
-
-	buildLinkIcon(node: any, canvasFile: TFile) {
-		// Create link
-		const linkIcon = document.createElement("div");
-		linkIcon.classList.add("markdown-embed-link");
-		const src = `${canvasFile.path}#${node.id}`;
-		linkIcon.setAttribute("aria-label", "Open in canvas");
-		linkIcon.setAttribute("src", src);
-		linkIcon.innerHTML = `
-				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
-						fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-						stroke-linejoin="round" class="svg-icon lucide-link">
-						<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-						<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-				</svg>
-		`;
-
-		linkIcon.addEventListener("click", async (e) => {
-			//TODO open link
-			this.app.workspace.getLeaf(true).openFile(canvasFile);
-		});
-		// Assemble the elements
-		linkIcon.style.position = "absolute";
-		linkIcon.style.top = "8px";
-		linkIcon.style.right = "8px";
-		linkIcon.style.cursor = "pointer";
-		linkIcon.style.opacity = "0.6";
-		linkIcon.style.transition = "opacity 0.2s ease-in-out";
-
-		linkIcon.addEventListener(
-			"mouseenter",
-			() => (linkIcon.style.opacity = "1")
-		);
-		linkIcon.addEventListener(
-			"mouseleave",
-			() => (linkIcon.style.opacity = "0.6")
-		);
-
-		return linkIcon;
 	}
 }
